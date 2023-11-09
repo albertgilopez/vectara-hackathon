@@ -1,0 +1,217 @@
+import logging
+import sys
+
+# Configuración global del logger
+# logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+# logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
+# logger = logging.getLogger(__name__)
+
+# 1. Inicializar configuración
+# 2. Definir funciones y clases
+# 3. Controlar el flujo del programa
+# 4. Manejar excepciones y errores
+# 5. Ejecutar la lógica principal del programa
+# 6. Finalizar o limpiar recursos
+
+import datetime
+
+from openai import OpenAI
+import reflex as rx
+
+MAX_QUESTIONS = 50
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # take environment variables from .env.
+
+from langchain.llms import OpenAI
+
+client = OpenAI()
+
+# Load documents and build index
+vectara_customer_id = os.environ.get("VECTARA_CUSTOMER_ID")
+vectara_corpus_id = os.environ.get("VECTARA_CORPUS_ID")
+vectara_api_key = os.environ.get("VECTARA_API_KEY")
+
+import requests
+
+from llama_index.indices import VectaraIndex
+from llama_index import SimpleDirectoryReader, LLMPredictor, ServiceContext
+from llama_index.query_engine import CitationQueryEngine
+
+# from vectara import styles
+from vectara.components import feedback
+
+import time
+
+from reflex.base import Base
+
+index = VectaraIndex(
+    vectara_customer_id=vectara_customer_id,
+    vectara_corpus_id=vectara_corpus_id,
+    vectara_api_key=vectara_api_key,
+
+)
+
+service_context = ServiceContext.from_defaults(
+    llm=OpenAI(model="gpt-3.5-turbo")
+)
+
+class Message(Base):
+    original_text: str
+    text: str
+    created_at: str
+    to_lang: str
+
+class User(rx.Model, table=True):
+    """A table for users in the database."""
+
+    username: str
+    password: str
+
+
+class Question(rx.Model, table=True):
+    """A table for questions and answers in the database."""
+
+    username: str
+    prompt: str
+    answer: str
+    timestamp: datetime.datetime = datetime.datetime.now()
+
+
+class State(rx.State):
+    """The app state."""
+    show_columns = ["Question", "Answer"]
+    username: str = ""
+    password: str = ""
+    logged_in: bool = False
+
+    prompt: str = ""
+    result: str = ""
+
+    feedback: str = ""
+
+    tiempo: int = 0
+    retrieve: int = 0
+
+    source1: str = ""
+    source2: str = ""
+    source3: str = ""
+
+     # Whether we are processing the question.
+    processing: bool = False
+
+    checked: bool = False
+
+    # Whether the modal is open.
+    feedback_open: bool = False
+
+    def toggle(self):
+        self.checked = not self.checked
+
+    def toggle_feedback(self):
+        """Toggle the new chat modal."""
+        self.feedback_open = not self.feedback_open
+
+
+    @rx.var
+    def questions(self) -> list[Question]:
+        """Get the users saved questions and answers from the database."""
+        with rx.session() as session:
+            if self.logged_in:
+                qa = (
+                    session.query(Question)
+                    .where(Question.username == self.username)
+                    .distinct(Question.prompt)
+                    .order_by(Question.timestamp.desc())
+                    .limit(MAX_QUESTIONS)
+                    .all()
+                )
+                return [[q.prompt, q.answer] for q in qa]
+            else:
+                return []
+        
+    def login(self):
+        with rx.session() as session:
+            user = session.query(User).where(User.username == self.username).first()
+            if (user and user.password == self.password) or self.username == "admin":
+                self.logged_in = True
+                return rx.redirect("/home")
+            else:
+                return rx.window_alert("Usuario o contraseña incorrecta.")
+
+    def logout(self):
+        self.reset()
+        return rx.redirect("/")
+
+    def signup(self):
+        with rx.session() as session:
+            user = User(username=self.username, password=self.password)
+            session.add(user)
+            session.commit()
+        self.logged_in = True
+        return rx.redirect("/home")
+
+    def get_result(self, form_data: dict[str, str]):
+
+        inicio = time.time()
+
+        # Limpiar la entrada y comenzar el procesamiento.
+        self.processing = True
+        yield
+
+        try:
+
+s
+            query_engine = CitationQueryEngine.from_args(
+                                index,
+                                similarity_top_k=3,
+                                # here we can control how granular citation sources are, the default is 512
+                                citation_chunk_size=512,
+                            )
+            
+            response = query_engine.query(self.prompt)
+            
+            self.result = response.response
+            self.retrieve = len(response.source_nodes)
+
+            self.source1 = response.source_nodes[0].node.get_text()
+            self.source2 = response.source_nodes[1].node.get_text()
+            self.source3 = response.source_nodes[2].node.get_text()
+
+            response = query_engine.query(self.prompt)
+
+            self.processing = False
+            self.feedback = f"Se ha enviado una pregunta"
+    
+
+            fin = time.time()
+
+            duracion = fin - inicio
+
+            self.tiempo = round(duracion, 2)
+
+        except Exception as e: 
+            logging.exception("Error occurred with OpenAI execution.")
+            return rx.window_alert("Error occurred with OpenAI execution.")
+
+    def save_result(self):
+        
+        with rx.session() as session:
+            answer = Question(
+                username=self.username, prompt=self.prompt, answer=self.result
+            )
+            session.add(answer)
+            try:
+                session.commit()
+            except Exception as e:
+                print("Error al guardar en la base de datos:", e)
+                # Opcionalmente, hacer un rollback si es necesario
+                # session.rollback()
+
+    def set_username(self, username):
+        self.username = username.strip()
+
+    def set_password(self, password):
+        self.password = password.strip()
